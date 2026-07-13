@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NIH Grant Info</title>
+  <style>
+    :root {
+      --accent: #5b2d91;
+      --accent-light: #7b4fb5;
+      --bg: #f7f7fb;
+      --border: #e0e0e8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: #1a1a2e;
+      margin: 0;
+      padding: 2rem;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    header { margin-bottom: 1.5rem; }
+    h1 { color: var(--accent); margin-bottom: 0.25rem; }
+    p.subtitle { color: #666; margin-top: 0; }
+    .card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    label { font-weight: 600; display: block; margin-bottom: 0.5rem; }
+    textarea {
+      width: 100%;
+      min-height: 70px;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.95rem;
+      resize: vertical;
+    }
+    .hint { font-size: 0.85rem; color: #888; margin-top: 0.4rem; }
+    .btn-row { margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: var(--accent-light); }
+    button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin: 1rem 0; color: #666; }
+    .error {
+      background: #fdecec; color: #b02a2a;
+      border: 1px solid #f5c2c2; border-radius: 6px;
+      padding: 0.75rem 1rem; margin-bottom: 1rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td {
+      text-align: left; padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    th { background: #f0edf7; color: var(--accent); position: sticky; top: 0; }
+    tr:hover td { background: #faf8fd; }
+    .table-wrap { overflow-x: auto; }
+    .money { text-align: right; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>NIH Grant Info</h1>
+      <p class="subtitle">Extract funding history from the NIH RePORTER API</p>
+    </header>
+
+    <div class="card">
+      <form id="grantForm">
+        <label for="grant_ids">Grant IDs</label>
+        <textarea id="grant_ids" name="grant_ids"
+          placeholder="R21AG087904, R01EB027075, R01CA245671"></textarea>
+        <div class="hint">
+          Enter one or more core project numbers, separated by commas or spaces
+          (e.g., <code>R21AG087904</code>).
+        </div>
+        <div class="btn-row">
+          <button type="submit" id="submitBtn">Search</button>
+          <button type="button" id="downloadBtn" class="secondary" disabled>
+            Download CSV
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div id="status" class="status" style="display:none;"></div>
+    <div id="errors"></div>
+
+    <div class="card" id="resultsCard" style="display:none;">
+      <div class="table-wrap">
+        <table id="resultsTable">
+          <thead><tr id="tableHead"></tr></thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("grantForm");
+    const submitBtn = document.getElementById("submitBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const statusEl = document.getElementById("status");
+    const errorsEl = document.getElementById("errors");
+    const resultsCard = document.getElementById("resultsCard");
+    const tableHead = document.getElementById("tableHead");
+    const tableBody = document.getElementById("tableBody");
+
+    // Human-friendly column labels
+    const LABELS = {
+      funding_agency: "Funding Agency",
+      title: "Title",
+      project_pi: "Project PI",
+      application_id: "Application ID",
+      project_start_date: "Start (YYYY/MM)",
+      project_end_date: "End (YYYY/MM)",
+      annual_direct_costs: "Annual Direct (avg)",
+      annual_indirect_costs: "Annual Indirect (avg)",
+      annual_total_costs: "Annual Total (avg)",
+      total_direct_costs: "Total Direct (sum)",
+      total_indirect_costs: "Total Indirect (sum)",
+      total_project_costs: "Total Project (sum)",
+    };
+    const MONEY_COLS = new Set([
+      "annual_direct_costs", "annual_indirect_costs", "annual_total_costs",
+      "total_direct_costs", "total_indirect_costs", "total_project_costs",
+    ]);
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const grantIds = document.getElementById("grant_ids").value.trim();
+      if (!grantIds) return;
+
+      submitBtn.disabled = true;
+      downloadBtn.disabled = true;
+      errorsEl.innerHTML = "";
+      resultsCard.style.display = "none";
+      statusEl.style.display = "block";
+      statusEl.textContent = "Fetching data from NIH RePORTER…";
+
+      try {
+        const resp = await fetch("/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_ids: grantIds }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          showError(data.error || "Something went wrong.");
+          return;
+        }
+
+        renderTable(data.columns, data.rows);
+        if (data.errors && data.errors.length) {
+          errorsEl.innerHTML = data.errors
+            .map(msg => `<div class="error">${msg}</div>`).join("");
+        }
+        statusEl.textContent =
+          `Found ${data.rows.length} grant(s).`;
+        if (data.rows.length > 0) downloadBtn.disabled = false;
+      } catch (err) {
+        showError("Request failed: " + err.message);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    downloadBtn.addEventListener("click", () => {
+      const grantIds = document.getElementById("grant_ids").value.trim();
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = "/download";
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "grant_ids";
+      input.value = grantIds;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+    });
+
+    function renderTable(columns, rows) {
+      tableHead.innerHTML = columns
+        .map(c => `<th>${LABELS[c] || c}</th>`).join("");
+      tableBody.innerHTML = rows.map(row =>
+        "<tr>" + columns.map(c => {
+          const cls = MONEY_COLS.has(c) ? ' class="money"' : "";
+          return `<td${cls}>${row[c] ?? ""}</td>`;
+        }).join("") + "</tr>"
+      ).join("");
+      resultsCard.style.display = "block";
+    }
+
+    function showError(msg) {
+      statusEl.style.display = "none";
+      errorsEl.innerHTML = `<div class="error">${msg}</div>`;
+    }
+  </script>
+</body>
+</html>

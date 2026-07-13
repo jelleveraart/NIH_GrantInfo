@@ -89,6 +89,20 @@ The tool queries the NIH RePORTER `/v2/projects/search` endpoint using the
 `project_nums` criterion, pages through all fiscal-year records for each grant,
 filters client-side to exact core-number matches, and aggregates the cost data.
 
+## Web Application
+
+A simple browser-based interface is also available.
+
+### Run the web app
+
+```bash
+pip install -r requirements.txt
+python3 app.py
+```
+
+Then open http://127.0.0.1:5000 in your browser. Enter one or more grant IDs,
+click **Search** to view results in a table, and **Download CSV** to export them.
+
 ## Notes & Caveats
 
 - Costs are averaged/summed only over fiscal years with reported values, so
