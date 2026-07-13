@@ -1,42 +1,46 @@
 # NIH Grant Info
 
-A command-line tool to extract funding information for NIH grants from the
+A tool to extract funding information for NIH grants from the
 [NIH RePORTER API](https://api.reporter.nih.gov/). For each grant, it retrieves
 the full fiscal-year award history and produces a clean summary of direct,
-indirect, and total costs.
+indirect, and total costs. Available as both a **command-line tool** and a
+**browser-based web application**.
 
 ## Features
 
 - Query one or multiple grants by project ID in a single run
 - Retrieves the complete funding history for each grant via the official NIH RePORTER API
-- Computes both **annual averages** and **lifetime sums** of direct, indirect, and total costs
-- Outputs a tidy CSV (`grant_summaries.csv`) with one row per grant
-- Prints a readable summary table to the terminal
+- Computes both **annual** and **lifetime (total)** direct, indirect, and total costs
+- **Choose how the annual metric is computed:** average across all active years, or the most recent year only
+- Correctly handles **multi-component awards** (e.g., P41, P01, U54) by excluding subprojects to avoid double-counting
+- Outputs a tidy CSV with one row per grant
+- Web interface with a results table and CSV download
 - Built-in safety guards against runaway API queries
 
 ## Requirements
 
 - Python 3.7+
 - [`requests`](https://pypi.org/project/requests/)
+- [`flask`](https://pypi.org/project/flask/) (for the web app)
 
 ## Installation
 
-Clone the repository and install the dependency:
+Clone the repository and install dependencies:
 
 ```bash
 git clone https://github.com/jelleveraart/NIH_GrantInfo.git
 cd NIH_GrantInfo
-pip install requests
+pip install -r requirements.txt
 ```
 
 > Tip: Consider using a virtual environment:
 > ```bash
 > python3 -m venv venv
 > source venv/bin/activate      # macOS/Linux
-> pip install requests
+> pip install -r requirements.txt
 > ```
 
-## Usage
+## Command-Line Usage
 
 Run the script with one or more grant IDs. IDs can be comma-separated,
 space-separated, or a mix:
@@ -45,90 +49,19 @@ space-separated, or a mix:
 # Single grant
 python3 nih_grant_history.py R21AG087904
 
-# Multiple grants (comma-separated)
+# Multiple grants
 python3 nih_grant_history.py R21AG087904,R01EB027075,R01CA245671
-
-# Multiple grants (space-separated)
-python3 nih_grant_history.py R21AG087904 R01EB027075 R01CA245671
 ```
 
-### Grant ID format
+### Annual metric option
 
-Use the **core project number** — the activity code, institute code, and serial number:
+Use the `--annual` flag to control how annual costs are computed:
 
-- ✅ Correct: `R21AG087904`
-- ❌ Incorrect: `5R21AG087904-01` (full project number with prefix/suffix)
+```bash
+# Average across all active years (default)
+python3 nih_grant_history.py R21AG087904 --annual average
 
-## Output
-
-### CSV file: `grant_summaries.csv`
-
-One row per grant with the following columns:
-
-| Column | Description |
-|---|---|
-| `funding_agency` | Administering agency (e.g., `NIH/NIA`) |
-| `title` | Project title |
-| `project_pi` | Contact Principal Investigator |
-| `application_id` | Grant ID (e.g., `R21AG087904`) |
-| `project_start_date` | Earliest project start (`YYYY/MM`) |
-| `project_end_date` | Latest project end (`YYYY/MM`) |
-| `annual_direct_costs` | Average direct costs across all years |
-| `annual_indirect_costs` | Average indirect costs across all years |
-| `annual_total_costs` | Average total costs across all years |
-| `total_direct_costs` | Sum of direct costs across all years |
-| `total_indirect_costs` | Sum of indirect costs across all years |
-| `total_project_costs` | Sum of total costs across all years |
-
-Cost values are formatted as `$1,023,343`.
-
-
-## How It Works
-
-The tool queries the NIH RePORTER `/v2/projects/search` endpoint using the
-`project_nums` criterion, pages through all fiscal-year records for each grant,
-filters client-side to exact core-number matches, and aggregates the cost data.
-
-## One-Click Launcher (macOS)
-
-A double-clickable launcher is included.
-
-1. Make the launcher executable (one-time setup):
-
-   chmod +x Launch_NIH_GrantInfo.command
-  
-2. Double-click `Launch_NIH_GrantInfo.command`.
-3. The Flask app starts and your browser opens automatically to
-   http://127.0.0.1:5000.
-
-To stop the app, press `Ctrl+C` in the Terminal window or close the window.
-
-## Troubleshooting
-
-**`[Errno 5] Input/output error`**
-This can occur when the app is launched from the one-click `.command` file and
-the output stream becomes unavailable. The code now wraps all console output in
-a safe logging helper (`safe_log`) that prevents this from crashing the app, so
-running the latest version resolves the issue.
+# Most recent year only
+python3 nih_grant_history.py R21AG087904 --annual latest
 ```
-
-Then open http://127.0.0.1:5000 in your browser. Enter one or more grant IDs,
-click **Search** to view results in a table, and **Download CSV** to export them.
-
-## Notes & Caveats
-
-- Costs are averaged/summed only over fiscal years with reported values, so
-  years with missing cost data do not skew the results toward zero.
-- Older grants may lack a direct/indirect breakdown in the RePORTER data.
-- The tool respects the API with a ~1 request/second pace and includes a
-  safety guard that aborts if a query unexpectedly matches too many records.
-
-## Data Source
-
-Funding data is retrieved from the publicly available
-[NIH RePORTER API](https://api.reporter.nih.gov/). Please review NIH RePORTER's
-terms of use for appropriate usage.
-
-## License
-
 MIT License — see [LICENSE](LICENSE) for details.

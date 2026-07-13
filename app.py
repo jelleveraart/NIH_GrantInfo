@@ -16,8 +16,9 @@ from nih_grant_history import (
 app = Flask(__name__)
 
 
-def process_grants(grant_ids):
-    """Fetch and summarize a list of grant IDs. Returns (summaries, errors)."""
+def process_grants(grant_ids, annual_method="average"):
+    """Fetch and summarize a list of grant IDs.
+    Returns (summaries, errors)."""
     summaries = []
     errors = []
     for grant_id in grant_ids:
@@ -26,12 +27,18 @@ def process_grants(grant_ids):
             if not raw:
                 errors.append(f"No records found for '{grant_id}'.")
                 continue
-            summary = summarize_grant(grant_id, raw)
+            summary = summarize_grant(grant_id, raw, annual_method=annual_method)
             if summary:
                 summaries.append(summary)
         except Exception as e:
             errors.append(f"Error processing '{grant_id}': {e}")
     return summaries, errors
+
+
+def normalize_annual_method(value):
+    """Validate the annual_method form value; default to 'average'."""
+    value = (value or "average").lower()
+    return value if value in ("average", "latest") else "average"
 
 
 @app.route("/", methods=["GET"])
@@ -43,6 +50,8 @@ def index():
 def search():
     """Handle the form submission, return JSON with results."""
     raw_input = request.form.get("grant_ids", "").strip()
+    annual_method = normalize_annual_method(request.form.get("annual_method"))
+
     if not raw_input:
         return jsonify({"error": "Please enter at least one grant ID."}), 400
 
@@ -50,7 +59,7 @@ def search():
     if not grant_ids:
         return jsonify({"error": "No valid grant IDs found."}), 400
 
-    summaries, errors = process_grants(grant_ids)
+    summaries, errors = process_grants(grant_ids, annual_method=annual_method)
 
     # Build display rows with formatted money
     rows = []
@@ -71,8 +80,10 @@ def search():
 def download():
     """Regenerate results and return them as a downloadable CSV."""
     raw_input = request.form.get("grant_ids", "").strip()
+    annual_method = normalize_annual_method(request.form.get("annual_method"))
+
     grant_ids = parse_grant_ids([raw_input])
-    summaries, _ = process_grants(grant_ids)
+    summaries, _ = process_grants(grant_ids, annual_method=annual_method)
 
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=FIELDNAMES)

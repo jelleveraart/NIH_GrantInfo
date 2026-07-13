@@ -43,6 +43,21 @@
       resize: vertical;
     }
     .hint { font-size: 0.85rem; color: #888; margin-top: 0.4rem; }
+    fieldset {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-top: 1rem;
+    }
+    fieldset legend { font-weight: 600; padding: 0 0.4rem; }
+    fieldset label {
+      font-weight: normal;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-right: 1.5rem;
+      margin-bottom: 0;
+    }
     .btn-row { margin-top: 1rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
     button {
       background: var(--accent);
@@ -91,6 +106,20 @@
           Enter one or more core project numbers, separated by commas or spaces
           (e.g., <code>R21AG087904</code>).
         </div>
+
+        <!-- Annual metric method selection -->
+        <fieldset>
+          <legend>Annual metric</legend>
+          <label>
+            <input type="radio" name="annual_method" value="average" checked>
+            Average across all active years
+          </label>
+          <label>
+            <input type="radio" name="annual_method" value="latest">
+            Most recent year only
+          </label>
+        </fieldset>
+
         <div class="btn-row">
           <button type="submit" id="submitBtn">Search</button>
           <button type="button" id="downloadBtn" class="secondary" disabled>
@@ -131,9 +160,10 @@
       application_id: "Application ID",
       project_start_date: "Start (YYYY/MM)",
       project_end_date: "End (YYYY/MM)",
-      annual_direct_costs: "Annual Direct (avg)",
-      annual_indirect_costs: "Annual Indirect (avg)",
-      annual_total_costs: "Annual Total (avg)",
+      annual_method: "Annual Method",
+      annual_direct_costs: "Annual Direct",
+      annual_indirect_costs: "Annual Indirect",
+      annual_total_costs: "Annual Total",
       total_direct_costs: "Total Direct (sum)",
       total_indirect_costs: "Total Indirect (sum)",
       total_project_costs: "Total Project (sum)",
@@ -143,10 +173,16 @@
       "total_direct_costs", "total_indirect_costs", "total_project_costs",
     ]);
 
+    function getAnnualMethod() {
+      return document.querySelector('input[name="annual_method"]:checked').value;
+    }
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const grantIds = document.getElementById("grant_ids").value.trim();
       if (!grantIds) return;
+
+      const annualMethod = getAnnualMethod();
 
       submitBtn.disabled = true;
       downloadBtn.disabled = true;
@@ -159,7 +195,10 @@
         const resp = await fetch("/search", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ grant_ids: grantIds }),
+          body: new URLSearchParams({
+            grant_ids: grantIds,
+            annual_method: annualMethod,
+          }),
         });
         const data = await resp.json();
 
@@ -173,8 +212,7 @@
           errorsEl.innerHTML = data.errors
             .map(msg => `<div class="error">${msg}</div>`).join("");
         }
-        statusEl.textContent =
-          `Found ${data.rows.length} grant(s).`;
+        statusEl.textContent = `Found ${data.rows.length} grant(s).`;
         if (data.rows.length > 0) downloadBtn.disabled = false;
       } catch (err) {
         showError("Request failed: " + err.message);
@@ -185,14 +223,24 @@
 
     downloadBtn.addEventListener("click", () => {
       const grantIds = document.getElementById("grant_ids").value.trim();
+      const annualMethod = getAnnualMethod();
+
       const form = document.createElement("form");
       form.method = "POST";
       form.action = "/download";
+
       const input = document.createElement("input");
       input.type = "hidden";
       input.name = "grant_ids";
       input.value = grantIds;
       form.appendChild(input);
+
+      const methodInput = document.createElement("input");
+      methodInput.type = "hidden";
+      methodInput.name = "annual_method";
+      methodInput.value = annualMethod;
+      form.appendChild(methodInput);
+
       document.body.appendChild(form);
       form.submit();
       document.body.removeChild(form);
