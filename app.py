@@ -3,10 +3,12 @@ import io
 
 from flask import Flask, render_template, request, Response, jsonify
 
-# Reuse the existing logic from your CLI script
+# Reuse the existing logic from the CLI script
 from nih_grant_history import (
     fetch_grant_history,
+    fetch_grants_by_pi,
     summarize_grant,
+    summarize_grants,
     parse_grant_ids,
     fmt_money,
     FIELDNAMES,
@@ -16,29 +18,32 @@ from nih_grant_history import (
 app = Flask(__name__)
 
 
-def process_grants(grant_ids, annual_method="average"):
-    """Fetch and summarize a list of grant IDs.
-    Returns (summaries, errors)."""
-    summaries = []
-    errors = []
-    for grant_id in grant_ids:
-        try:
-            raw = fetch_grant_history(grant_id)
-            if not raw:
-                errors.append(f"No records found for '{grant_id}'.")
-                continue
-            summary = summarize_grant(grant_id, raw, annual_method=annual_method)
-            if summary:
-                summaries.append(summary)
-        except Exception as e:
-            errors.append(f"Error processing '{grant_id}': {e}")
-    return summaries, errors
-
-
 def normalize_annual_method(value):
     """Validate the annual_method form value; default to 'average'."""
     value = (value or "average").lower()
     return value if value in ("average", "latest") else "average"
+
+
+def resolve_grant_ids(search_mode, raw_input):
+    """
+    Return (grant_ids, errors) based on the search mode.
+    - 'pi': treat raw_input as an investigator name
+    - otherwise: treat raw_input as one or more grant IDs
+    """
+    errors = []
+    if search_mode == "pi":
+        pi_name = raw_input.strip()
+        if not pi_name:
+            return [], ["Please enter an investigator name."]
+        grant_ids = fetch_grants_by_pi(pi_name)
+        if not grant_ids:
+            errors.append(f"No grants found for PI '{pi_name}'.")
+        return grant_ids, errors
+    else:
+        grant_ids = parse_grant_ids([raw_input])
+        if not grant_ids:
+            errors.append("No valid grant IDs found.")
+        return grant_ids, errors
 
 
 @app.route("/", methods=["GET"])
@@ -49,17 +54,21 @@ def index():
 @app.route("/search", methods=["POST"])
 def search():
     """Handle the form submission, return JSON with results."""
-    raw_input = request.form.get("grant_ids", "").strip()
+    raw_input = request.form.get("query", "").strip()
+    search_mode = request.form.get("search_mode", "grant_id")
     annual_method = normalize_annual_method(request.form.get("annual_method"))
 
     if not raw_input:
-        return jsonify({"error": "Please enter at least one grant ID."}), 400
+        return jsonify({"error": "Please enter a search term."}), 400
 
-    grant_ids = parse_grant_ids([raw_input])
+    grant_ids, resolve_errors = resolve_grant_ids(search_mode, raw_input)
     if not grant_ids:
-        return jsonify({"error": "No valid grant IDs found."}), 400
+        return jsonify({
+            "error": resolve_errors[0] if resolve_errors else "Nothing to search."
+        }), 400
 
-    summaries, errors = process_grants(grant_ids, annual_method=annual_method)
+    summaries, errors = summarize_grants(grant_ids, annual_method=annual_method)
+    errors = resolve_errors + errors
 
     # Build display rows with formatted money
     rows = []
@@ -79,11 +88,12 @@ def search():
 @app.route("/download", methods=["POST"])
 def download():
     """Regenerate results and return them as a downloadable CSV."""
-    raw_input = request.form.get("grant_ids", "").strip()
+    raw_input = request.form.get("query", "").strip()
+    search_mode = request.form.get("search_mode", "grant_id")
     annual_method = normalize_annual_method(request.form.get("annual_method"))
 
-    grant_ids = parse_grant_ids([raw_input])
-    summaries, _ = process_grants(grant_ids, annual_method=annual_method)
+    grant_ids, _ = resolve_grant_ids(search_mode, raw_input)
+    summaries, _ = summarize_grants(grant_ids, annual_method=annual_method)
 
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=FIELDNAMES)

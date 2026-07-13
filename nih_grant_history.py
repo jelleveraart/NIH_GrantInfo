@@ -100,6 +100,101 @@ def fetch_grant_history(core_project_num, page_size=100, pause=1.0, max_pages=50
     )
     return filtered
 
+def fetch_grants_by_pi(pi_name, page_size=100, pause=1.0, max_pages=50):
+    """
+    Find all grants associated with a Principal Investigator name.
+    Returns a list of unique core project numbers.
+
+    Accepts names as 'Last, First' or 'First Last'. Uses last_name /
+    first_name matching, which is more reliable than 'any_name'.
+    """
+    # Parse the name into last/first components.
+    pi_name = pi_name.strip()
+    last_name = ""
+    first_name = ""
+    if "," in pi_name:
+        parts = pi_name.split(",", 1)
+        last_name = parts[0].strip()
+        first_name = parts[1].strip()
+    else:
+        parts = pi_name.split()
+        if len(parts) >= 2:
+            first_name = parts[0].strip()
+            last_name = parts[-1].strip()
+        else:
+            last_name = pi_name  # single token: treat as last name
+
+    # Build the PI criterion.
+    pi_criterion = {}
+    if last_name:
+        pi_criterion["last_name"] = last_name
+    if first_name:
+        pi_criterion["first_name"] = first_name
+
+    safe_log(f"  PI search: last_name='{last_name}', first_name='{first_name}'")
+
+    core_nums = []
+    seen = set()
+    offset = 0
+    page = 0
+
+    while True:
+        page += 1
+        if page > max_pages:
+            safe_log(f"  Reached max_pages ({max_pages}); stopping PI search.")
+            break
+
+        payload = {
+            "criteria": {"pi_names": [pi_criterion]},
+            "include_fields": [
+                "CoreProjectNum",
+                "ContactPiName",
+                "ProjectTitle",
+                "FiscalYear",
+            ],
+            "offset": offset,
+            "limit": page_size,
+            "sort_field": "fiscal_year",
+            "sort_order": "desc",
+        }
+
+        safe_log(f"  PI search page {page} (offset={offset}) for '{pi_name}'...")
+        try:
+            resp = requests.post(API_URL, json=payload, timeout=30)
+            resp.raise_for_status()
+        except requests.exceptions.Timeout:
+            safe_log("  Request timed out. The API may be slow or unreachable.")
+            break
+        except requests.exceptions.RequestException as e:
+            safe_log(f"  Request failed: {e}")
+            break
+
+        data = resp.json()
+        results = data.get("results", [])
+        total = data.get("meta", {}).get("total", 0)
+
+        safe_log(f"    -> got {len(results)} records (reported total: {total})")
+
+        if total > 2000:
+            safe_log(
+                f"  ⚠️  WARNING: '{pi_name}' matched {total:,} records — "
+                f"the name may be too common. Consider adding first name."
+            )
+
+        for r in results:
+            core = r.get("core_project_num")
+            if core and core not in seen:
+                seen.add(core)
+                core_nums.append(core)
+
+        offset += page_size
+        if not results or offset >= total or offset >= (max_pages * page_size):
+            break
+
+        time.sleep(pause)
+
+    safe_log(f"  Found {len(core_nums)} unique grant(s) for PI '{pi_name}'.")
+    return core_nums
 
 def derive_funding_agency(record):
     """Build a short funding-agency label like 'NIH/NIA'."""
@@ -210,6 +305,26 @@ def summarize_grant(core_project_num, records, annual_method="average"):
     }
 
 
+def summarize_grants(grant_ids, annual_method="average"):
+    """
+    Given a list of grant IDs (core project numbers), fetch and summarize
+    each one. Returns (summaries, errors).
+    """
+    summaries = []
+    errors = []
+    for gid in grant_ids:
+        safe_log(f"--- {gid} ---")
+        raw = fetch_grant_history(gid)
+        if not raw:
+            errors.append(f"No records found for '{gid}'.")
+            continue
+        summary = summarize_grant(gid, raw, annual_method=annual_method)
+        if summary:
+            summaries.append(summary)
+        safe_log("")
+    return summaries, errors
+
+
 FIELDNAMES = [
     "funding_agency",
     "title",
@@ -230,7 +345,6 @@ MONEY_FIELDS = {
     "annual_direct_costs", "annual_indirect_costs", "annual_total_costs",
     "total_direct_costs", "total_indirect_costs", "total_project_costs",
 }
-
 
 def write_summary_csv(summaries, filename):
     """Write one row per grant to a single CSV."""
@@ -304,35 +418,51 @@ def main():
             if annual_method not in ("average", "latest"):
                 safe_log("Invalid --annual value. Use 'average' or 'latest'. Defaulting to 'average'.")
                 annual_method = "average"
-            # remove the flag and its value from args
             del args[idx:idx + 2]
         except IndexError:
-            safe_log("--annual requires a value ('average' or 'latest'). Defaulting to 'average'.")
+            safe_log("--annual requires a value. Defaulting to 'average'.")
             annual_method = "average"
             del args[idx:]
 
-    if not args:
-        safe_log("Usage: python3 nih_grant_history.py <GRANT_ID>[,<GRANT_ID>,...] [--annual average|latest]")
-        safe_log("Example: python3 nih_grant_history.py R21AG087904,R01EB027075 --annual latest")
-        sys.exit(1)
+    # Optional: --pi "Last, First"  -> search by investigator
+    pi_mode = False
+    pi_name = None
+    if "--pi" in args:
+        idx = args.index("--pi")
+        try:
+            pi_name = args[idx + 1]
+            pi_mode = True
+            del args[idx:idx + 2]
+        except IndexError:
+            safe_log("--pi requires a name, e.g., --pi \"Veraart, Jelle\".")
+            sys.exit(1)
 
-    grant_ids = parse_grant_ids(args)
-    safe_log(f"Processing {len(grant_ids)} grant(s) [annual={annual_method}]: {', '.join(grant_ids)}\n")
+    # Determine the list of grant IDs to summarize.
+    if pi_mode:
+        safe_log(f"Searching grants for PI '{pi_name}' [annual={annual_method}]...\n")
+        grant_ids = fetch_grants_by_pi(pi_name)
+        if not grant_ids:
+            safe_log(f"No grants found for PI '{pi_name}'.")
+            return
+        safe_log(f"\nSummarizing {len(grant_ids)} grant(s) found for '{pi_name}'.\n")
+    else:
+        if not args:
+            safe_log("Usage:")
+            safe_log("  Search by grant ID:")
+            safe_log("    python3 nih_grant_history.py <GRANT_ID>[,<GRANT_ID>,...] [--annual average|latest]")
+            safe_log("  Search by investigator:")
+            safe_log("    python3 nih_grant_history.py --pi \"Last, First\" [--annual average|latest]")
+            sys.exit(1)
+        grant_ids = parse_grant_ids(args)
+        safe_log(f"Processing {len(grant_ids)} grant(s) [annual={annual_method}]: {', '.join(grant_ids)}\n")
 
-    summaries = []
-    for grant_id in grant_ids:
-        safe_log(f"--- {grant_id} ---")
-        raw = fetch_grant_history(grant_id)
-        if not raw:
-            safe_log(f"  No records found for '{grant_id}'. Skipping.\n")
-            continue
-        summary = summarize_grant(grant_id, raw, annual_method=annual_method)
-        if summary:
-            summaries.append(summary)
-        safe_log("")
+    summaries, errors = summarize_grants(grant_ids, annual_method=annual_method)
+
+    for err in errors:
+        safe_log(f"  {err}")
 
     if not summaries:
-        safe_log("No results for any of the provided grant IDs.")
+        safe_log("No results to report.")
         return
 
     write_summary_csv(summaries, "grant_summaries.csv")

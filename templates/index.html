@@ -48,6 +48,7 @@
       border-radius: 6px;
       padding: 0.75rem 1rem;
       margin-top: 1rem;
+      margin-bottom: 0.5rem;
     }
     fieldset legend { font-weight: 600; padding: 0 0.4rem; }
     fieldset label {
@@ -99,10 +100,23 @@
 
     <div class="card">
       <form id="grantForm">
-        <label for="grant_ids">Grant IDs</label>
-        <textarea id="grant_ids" name="grant_ids"
+        <!-- Search mode toggle -->
+        <fieldset>
+          <legend>Search by</legend>
+          <label>
+            <input type="radio" name="search_mode" value="grant_id" checked>
+            Grant ID
+          </label>
+          <label>
+            <input type="radio" name="search_mode" value="pi">
+            Investigator
+          </label>
+        </fieldset>
+
+        <label for="query" id="queryLabel">Grant IDs</label>
+        <textarea id="query" name="query"
           placeholder="R21AG087904, R01EB027075, R01CA245671"></textarea>
-        <div class="hint">
+        <div class="hint" id="queryHint">
           Enter one or more core project numbers, separated by commas or spaces
           (e.g., <code>R21AG087904</code>).
         </div>
@@ -152,6 +166,10 @@
     const tableHead = document.getElementById("tableHead");
     const tableBody = document.getElementById("tableBody");
 
+    const queryLabel = document.getElementById("queryLabel");
+    const queryHint = document.getElementById("queryHint");
+    const queryInput = document.getElementById("query");
+
     // Human-friendly column labels
     const LABELS = {
       funding_agency: "Funding Agency",
@@ -173,15 +191,38 @@
       "total_direct_costs", "total_indirect_costs", "total_project_costs",
     ]);
 
+    function getSearchMode() {
+      return document.querySelector('input[name="search_mode"]:checked').value;
+    }
     function getAnnualMethod() {
       return document.querySelector('input[name="annual_method"]:checked').value;
     }
 
+    // Update the label/placeholder/hint when the search mode changes
+    document.querySelectorAll('input[name="search_mode"]').forEach(radio => {
+      radio.addEventListener("change", () => {
+        if (getSearchMode() === "pi") {
+          queryLabel.textContent = "Investigator Name";
+          queryInput.placeholder = "Veraart, Jelle";
+          queryHint.innerHTML =
+            "Enter an investigator name (format: <code>Last, First</code>). " +
+            "Common names may return many grants.";
+        } else {
+          queryLabel.textContent = "Grant IDs";
+          queryInput.placeholder = "R21AG087904, R01EB027075, R01CA245671";
+          queryHint.innerHTML =
+            "Enter one or more core project numbers, separated by commas or " +
+            "spaces (e.g., <code>R21AG087904</code>).";
+        }
+      });
+    });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const grantIds = document.getElementById("grant_ids").value.trim();
-      if (!grantIds) return;
+      const query = queryInput.value.trim();
+      if (!query) return;
 
+      const searchMode = getSearchMode();
       const annualMethod = getAnnualMethod();
 
       submitBtn.disabled = true;
@@ -189,14 +230,17 @@
       errorsEl.innerHTML = "";
       resultsCard.style.display = "none";
       statusEl.style.display = "block";
-      statusEl.textContent = "Fetching data from NIH RePORTER…";
+      statusEl.textContent = searchMode === "pi"
+        ? "Searching grants by investigator… (this may take a moment)"
+        : "Fetching data from NIH RePORTER…";
 
       try {
         const resp = await fetch("/search", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
-            grant_ids: grantIds,
+            query: query,
+            search_mode: searchMode,
             annual_method: annualMethod,
           }),
         });
@@ -222,28 +266,26 @@
     });
 
     downloadBtn.addEventListener("click", () => {
-      const grantIds = document.getElementById("grant_ids").value.trim();
+      const query = queryInput.value.trim();
+      const searchMode = getSearchMode();
       const annualMethod = getAnnualMethod();
 
-      const form = document.createElement("form");
-      form.method = "POST";
-      form.action = "/download";
+      const dlForm = document.createElement("form");
+      dlForm.method = "POST";
+      dlForm.action = "/download";
 
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = "grant_ids";
-      input.value = grantIds;
-      form.appendChild(input);
+      [["query", query], ["search_mode", searchMode],
+       ["annual_method", annualMethod]].forEach(([name, value]) => {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value;
+        dlForm.appendChild(input);
+      });
 
-      const methodInput = document.createElement("input");
-      methodInput.type = "hidden";
-      methodInput.name = "annual_method";
-      methodInput.value = annualMethod;
-      form.appendChild(methodInput);
-
-      document.body.appendChild(form);
-      form.submit();
-      document.body.removeChild(form);
+      document.body.appendChild(dlForm);
+      dlForm.submit();
+      document.body.removeChild(dlForm);
     });
 
     function renderTable(columns, rows) {
