@@ -24,6 +24,11 @@ def normalize_annual_method(value):
     return value if value in ("average", "latest") else "average"
 
 
+def parse_bool(value):
+    """Interpret a form value as a boolean."""
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
 def resolve_grant_ids(search_mode, raw_input):
     """
     Return (grant_ids, errors) based on the search mode.
@@ -57,6 +62,7 @@ def search():
     raw_input = request.form.get("query", "").strip()
     search_mode = request.form.get("search_mode", "grant_id")
     annual_method = normalize_annual_method(request.form.get("annual_method"))
+    project_future = parse_bool(request.form.get("project_future"))
 
     if not raw_input:
         return jsonify({"error": "Please enter a search term."}), 400
@@ -67,10 +73,11 @@ def search():
             "error": resolve_errors[0] if resolve_errors else "Nothing to search."
         }), 400
 
-    summaries, errors = summarize_grants(grant_ids, annual_method=annual_method)
+    summaries, errors = summarize_grants(
+        grant_ids, annual_method=annual_method, project_future=project_future
+    )
     errors = resolve_errors + errors
 
-    # Build display rows with formatted money
     rows = []
     for s in summaries:
         row = dict(s)
@@ -91,9 +98,12 @@ def download():
     raw_input = request.form.get("query", "").strip()
     search_mode = request.form.get("search_mode", "grant_id")
     annual_method = normalize_annual_method(request.form.get("annual_method"))
+    project_future = parse_bool(request.form.get("project_future"))
 
     grant_ids, _ = resolve_grant_ids(search_mode, raw_input)
-    summaries, _ = summarize_grants(grant_ids, annual_method=annual_method)
+    summaries, _ = summarize_grants(
+        grant_ids, annual_method=annual_method, project_future=project_future
+    )
 
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=FIELDNAMES)
