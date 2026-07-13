@@ -7,11 +7,14 @@ API_URL = "https://api.reporter.nih.gov/v2/projects/search"
 
 
 def fetch_grant_history(core_project_num, page_size=100, pause=1.0, max_pages=50):
-    """
-    Fetch all fiscal-year records for a given NIH grant.
-    Uses the 'project_nums' criterion, guards against runaway loops,
-    and filters client-side to keep only exact core-number matches.
-    """
+    """Fetch all fiscal-year records for a given NIH grant."""
+
+    def log(msg):
+        try:
+            print(msg, flush=True)
+        except (OSError, IOError):
+            pass  # stdout may be unavailable (e.g., detached launcher window)
+
     all_results = []
     offset = 0
     page = 0
@@ -19,26 +22,17 @@ def fetch_grant_history(core_project_num, page_size=100, pause=1.0, max_pages=50
     while True:
         page += 1
         if page > max_pages:
-            print(f"  Reached max_pages ({max_pages}); stopping to avoid runaway loop.")
+            log(f"  Reached max_pages ({max_pages}); stopping.")
             break
 
         payload = {
             "criteria": {"project_nums": [core_project_num]},
             "include_fields": [
-                "ApplId",
-                "ProjectNum",
-                "CoreProjectNum",
-                "FiscalYear",
-                "AwardAmount",         # total cost
-                "DirectCostAmt",       # direct costs
-                "IndirectCostAmt",     # indirect costs
-                "ProjectTitle",
-                "Organization",
-                "ContactPiName",
-                "AwardNoticeDate",
-                "ProjectStartDate",
-                "ProjectEndDate",
-                "AgencyIcAdmin",       # administering IC (funding agency)
+                "ApplId", "ProjectNum", "CoreProjectNum", "FiscalYear",
+                "AwardAmount", "DirectCostAmt", "IndirectCostAmt",
+                "ProjectTitle", "Organization", "ContactPiName",
+                "AwardNoticeDate", "ProjectStartDate", "ProjectEndDate",
+                "AgencyIcAdmin",
             ],
             "offset": offset,
             "limit": page_size,
@@ -46,48 +40,37 @@ def fetch_grant_history(core_project_num, page_size=100, pause=1.0, max_pages=50
             "sort_order": "asc",
         }
 
-        print(f"  Requesting page {page} (offset={offset})...", flush=True)
+        log(f"  Requesting page {page} (offset={offset})...")
         try:
             resp = requests.post(API_URL, json=payload, timeout=30)
             resp.raise_for_status()
         except requests.exceptions.Timeout:
-            print("  Request timed out. The API may be slow or unreachable.")
+            log("  Request timed out.")
             break
         except requests.exceptions.RequestException as e:
-            print(f"  Request failed: {e}")
+            log(f"  Request failed: {e}")
             break
 
         data = resp.json()
         results = data.get("results", [])
         total = data.get("meta", {}).get("total", 0)
+        log(f"    -> got {len(results)} records (reported total: {total})")
 
-        print(f"    -> got {len(results)} records (reported total: {total})", flush=True)
-
-        # SAFETY GUARD: a single grant's history is small.
         if total > 1000:
-            print(
-                f"  ⚠️  ERROR: Query matched {total:,} records — far too many "
-                f"for a single grant. Skipping '{core_project_num}'."
-            )
+            log(f"  ERROR: Query matched {total:,} records. Skipping.")
             return []
 
         all_results.extend(results)
         offset += page_size
-
         if not results or offset >= total:
             break
-
         time.sleep(pause)
 
-    # CLIENT-SIDE FILTER: keep only exact core-number matches.
     filtered = [
         r for r in all_results
         if (r.get("core_project_num") or "").upper() == core_project_num.upper()
     ]
-    print(
-        f"  Done. Collected {len(all_results)} raw record(s); "
-        f"{len(filtered)} match core '{core_project_num}' exactly."
-    )
+    log(f"  Done. {len(filtered)} match core '{core_project_num}' exactly.")
     return filtered
 
 

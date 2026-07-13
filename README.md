@@ -89,15 +89,27 @@ The tool queries the NIH RePORTER `/v2/projects/search` endpoint using the
 `project_nums` criterion, pages through all fiscal-year records for each grant,
 filters client-side to exact core-number matches, and aggregates the cost data.
 
-## Web Application
+## One-Click Launcher (macOS)
 
-A simple browser-based interface is also available.
+A double-clickable launcher is included.
 
-### Run the web app
+1. Make the launcher executable (one-time setup):
 
-```bash
-pip install -r requirements.txt
-python3 app.py
+   chmod +x Launch_NIH_GrantInfo.command
+  
+2. Double-click `Launch_NIH_GrantInfo.command`.
+3. The Flask app starts and your browser opens automatically to
+   http://127.0.0.1:5000.
+
+To stop the app, press `Ctrl+C` in the Terminal window or close the window.
+
+## Troubleshooting
+
+**`[Errno 5] Input/output error`**
+This can occur when the app is launched from the one-click `.command` file and
+the output stream becomes unavailable. The code now wraps all console output in
+a safe logging helper (`safe_log`) that prevents this from crashing the app, so
+running the latest version resolves the issue.
 ```
 
 Then open http://127.0.0.1:5000 in your browser. Enter one or more grant IDs,
