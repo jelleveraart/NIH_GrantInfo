@@ -50,6 +50,8 @@ def fetch_grant_history(core_project_num, page_size=100, pause=1.0, max_pages=50
                 "AwardNoticeDate",
                 "ProjectStartDate",
                 "ProjectEndDate",
+                "BudgetStart",
+                "BudgetEnd",
                 "AgencyIcAdmin",
             ],
             "offset": offset,
@@ -218,7 +220,6 @@ def derive_award_type(core_project_num):
     """Extract the NIH activity code (award type) from a core project
     number, e.g., 'R21' from 'R21AG087904', 'P41' from 'P41EB017183'."""
     core = (core_project_num or "").upper()
-    # Activity code: 1-2 letters followed by 2 digits (e.g., R01, R21, P41, U54, K99).
     m = re.match(r"^([A-Z]{1,2}\d{2})", core)
     return m.group(1) if m else ""
 
@@ -263,6 +264,23 @@ def months_between(start_date, end_date):
     return (ey - sy) * 12 + (em - sm)
 
 
+def years_covered_by_record(record):
+    """Determine how many project years a single award record covers,
+    based on its BUDGET period (budget_start -> budget_end).
+
+    - A ~12-month budget period covers 1 year (traditional/staggered).
+    - A multi-year budget period (e.g., 36 months) covers multiple years
+      (Multi-Year Funding, where the full budget is awarded up front).
+
+    Returns an int >= 1. Falls back to 1 if budget dates are unavailable.
+    """
+    budget_months = months_between(record.get("budget_start"),
+                                   record.get("budget_end"))
+    if budget_months is None or budget_months <= 0:
+        return 1  # fallback: assume a single year
+    return max(1, round(budget_months / 12))
+
+
 def fmt_money(val):
     """Format a number as '$1,023,343'."""
     if val is None:
@@ -277,20 +295,21 @@ def summarize_grant(core_project_num, records, annual_method="average",
     For multi-component awards (P41, P01, U54), keep only parent records
     (subproject_id empty) to avoid double-counting.
 
-    annual_method: "average" (mean across years) or "latest" (most recent year).
+    FUNDING MODEL DETECTION (via budget periods):
+      Each record's BUDGET period (budget_start -> budget_end) tells us how
+      many years that single award covers:
+        - ~12 months  -> 1 year   (traditional / staggered funding)
+        - N*12 months -> N years  (Multi-Year Funding, full budget up front)
+      This unifies both models: total funded years = sum of years covered by
+      each record, regardless of how many records exist.
+
+    annual_method: "average" (mean annualized rate) or "latest"
+      (annualized rate of the most recent record).
 
     project_future controls the TOTAL columns:
-      - False: totals = actual sum of awarded years (default)
-      - True:  for active grants, add an extrapolation of remaining years
-               using the most recent year's costs.
-
-    Remaining-year logic:
-      1. Compute the intended project duration (whole years) from the
-         start and end dates (month-aware span).
-      2. Count how many fiscal-year records were actually awarded.
-      3. projected_years = max(0, intended_duration - awarded_records),
-         but only if the grant is genuinely still active (end date in
-         the future relative to today).
+      - False: totals = actual sum of awarded records (default)
+      - True:  for active grants, add an extrapolation of any project years
+               not yet funded, using the most recent annualized rate.
     """
     if not records:
         return None
@@ -314,66 +333,89 @@ def summarize_grant(core_project_num, records, annual_method="average",
     working = sorted(working, key=lambda x: (x.get("fiscal_year") or 0))
     latest = working[-1]
 
-    directs = [r.get("direct_cost_amt") for r in working if r.get("direct_cost_amt") is not None]
-    indirects = [r.get("indirect_cost_amt") for r in working if r.get("indirect_cost_amt") is not None]
-    totals = [r.get("award_amount") for r in working if r.get("award_amount") is not None]
+    # --- Per-record annualization based on budget periods ---
+    # For each record, figure out how many years it covers and annualize.
+    annualized_directs = []
+    annualized_indirects = []
+    annualized_totals = []
+    funded_years = 0
+    any_multi_year = False
 
-    def total(vals):
-        return sum(vals) if vals else 0
+    for r in working:
+        yrs = years_covered_by_record(r)
+        funded_years += yrs
+        if yrs > 1:
+            any_multi_year = True
 
-    # --- Annual metric ---
+        d = r.get("direct_cost_amt")
+        i = r.get("indirect_cost_amt")
+        t = r.get("award_amount")
+
+        if d is not None:
+            annualized_directs.append(d / yrs)
+        if i is not None:
+            annualized_indirects.append(i / yrs)
+        if t is not None:
+            annualized_totals.append(t / yrs)
+
+    funding_model = "multi_year" if any_multi_year else "staggered"
+
+    # --- Annual metric (uses annualized per-record values) ---
     if annual_method == "latest":
-        annual_direct = latest.get("direct_cost_amt") or 0
-        annual_indirect = latest.get("indirect_cost_amt") or 0
-        annual_total = latest.get("award_amount") or 0
-    else:  # "average" (default)
+        latest_yrs = years_covered_by_record(latest)
+        annual_direct = round((latest.get("direct_cost_amt") or 0) / latest_yrs)
+        annual_indirect = round((latest.get("indirect_cost_amt") or 0) / latest_yrs)
+        annual_total = round((latest.get("award_amount") or 0) / latest_yrs)
+    else:  # "average" (default): mean of annualized rates across records
         def avg(vals):
             return round(sum(vals) / len(vals)) if vals else 0
-        annual_direct = avg(directs)
-        annual_indirect = avg(indirects)
-        annual_total = avg(totals)
+        annual_direct = avg(annualized_directs)
+        annual_indirect = avg(annualized_indirects)
+        annual_total = avg(annualized_totals)
 
+    # --- Actual (awarded) totals: sum of the raw award amounts ---
+    def total_raw(field):
+        return sum(r.get(field) for r in working if r.get(field) is not None)
+
+    actual_direct = total_raw("direct_cost_amt")
+    actual_indirect = total_raw("indirect_cost_amt")
+    actual_total = total_raw("award_amount")
+
+    # --- Project period dates ---
     start_dates = [r.get("project_start_date") for r in working if r.get("project_start_date")]
     end_dates = [r.get("project_end_date") for r in working if r.get("project_end_date")]
     project_start = min(start_dates) if start_dates else None
     project_end = max(end_dates) if end_dates else None
 
-    # --- Intended duration, awarded records, and remaining years ---
-    awarded_records = len(working)
-
-    # Intended duration in whole years from the month-aware span.
+    # Intended duration (whole years) from the project-period span.
     span_months = months_between(project_start, project_end)
     if span_months is not None and span_months > 0:
-        # Round to nearest whole year (e.g., a 21-month grant -> 2 years).
         intended_years = max(1, round(span_months / 12))
     else:
-        intended_years = awarded_records  # fallback if dates unavailable
+        intended_years = funded_years  # fallback
 
-    # Is the grant genuinely still active? (end date after today)
+    # --- Active status (end date after today) ---
     end_year = year_from_date(project_end)
     end_month = month_from_date(project_end, default=12)
-
     today = datetime.date.today()
     is_active = False
     if end_year:
         if (end_year > today.year) or (end_year == today.year and end_month >= today.month):
             is_active = True
 
-    # Remaining (projected) years: intended minus awarded, only if active.
+    # --- Remaining (unfunded) years: intended minus already-funded years ---
+    # This uses FUNDED YEARS (from budget periods), not record count, so
+    # Multi-Year Funding that already covers the full duration yields 0.
     if is_active:
-        projected_years = max(0, intended_years - awarded_records)
+        projected_years = max(0, intended_years - funded_years)
     else:
         projected_years = 0
 
-    # --- Actual (awarded) totals ---
-    actual_direct = total(directs)
-    actual_indirect = total(indirects)
-    actual_total = total(totals)
-
-    # --- Projected totals (most-recent-year extrapolation) ---
-    per_year_direct = latest.get("direct_cost_amt") or 0
-    per_year_indirect = latest.get("indirect_cost_amt") or 0
-    per_year_total = latest.get("award_amount") or 0
+    # --- Projected totals: add unfunded years at the latest annualized rate ---
+    latest_yrs = years_covered_by_record(latest)
+    per_year_direct = round((latest.get("direct_cost_amt") or 0) / latest_yrs)
+    per_year_indirect = round((latest.get("indirect_cost_amt") or 0) / latest_yrs)
+    per_year_total = round((latest.get("award_amount") or 0) / latest_yrs)
 
     projected_direct = actual_direct + per_year_direct * projected_years
     projected_indirect = actual_indirect + per_year_indirect * projected_years
@@ -399,6 +441,9 @@ def summarize_grant(core_project_num, records, annual_method="average",
         "project_start_date": to_year_month(project_start),
         "project_end_date": to_year_month(project_end),
         "is_active": "Yes" if is_active else "No",
+        "funding_model": funding_model,
+        "funded_years": funded_years,
+        "intended_years": intended_years,
         "annual_method": annual_method,
         "total_basis": total_basis,
         "projected_years": projected_years,
@@ -419,6 +464,9 @@ FIELDNAMES = [
     "project_start_date",
     "project_end_date",
     "is_active",
+    "funding_model",
+    "funded_years",
+    "intended_years",
     "annual_method",
     "total_basis",
     "projected_years",
@@ -471,12 +519,12 @@ def summary_to_nyu_cv_row(summary):
     grant_num = summary.get("application_id", "")
     return {
         "Funding Agency": summary.get("funding_agency", ""),
-        "Role": "",  # left blank per spec (blank if not PI)
-        "Effort %": "",  # left blank per spec
+        "Role": "",
+        "Effort %": "",
         "Project Title": summary.get("title", ""),
         "Award Type": derive_award_type(grant_num),
         "Grant #": grant_num,
-        "Project ID": "",  # left blank per spec
+        "Project ID": "",
         "Project Start Date": summary.get("project_start_date", ""),
         "Project End Date": summary.get("project_end_date", ""),
         "Annual Project Direct Costs": fmt_money(summary.get("annual_direct_costs")),
@@ -537,6 +585,9 @@ def print_summary_table(summaries):
             "project_start_date": "Project Start Date",
             "project_end_date": "Project End Date",
             "is_active": "Active",
+            "funding_model": "Funding Model",
+            "funded_years": "Funded Years",
+            "intended_years": "Intended Years",
             "annual_method": "Annual Method",
             "total_basis": "Total Basis",
             "projected_years": "Projected Years",
@@ -605,7 +656,7 @@ def main():
             annual_method = "average"
             del args[idx:]
 
-    # Optional: --project  -> extrapolate remaining years for active grants
+    # Optional: --project  -> extrapolate unfunded years for active grants
     project_future = False
     if "--project" in args:
         project_future = True
@@ -630,7 +681,6 @@ def main():
             safe_log("--pi requires a name, e.g., --pi \"Fieremans, Els\".")
             sys.exit(1)
 
-    # Determine the list of grant IDs to summarize.
     if pi_mode:
         safe_log(f"Searching grants for PI '{pi_name}' "
                  f"[annual={annual_method}, project={project_future}]...\n")
