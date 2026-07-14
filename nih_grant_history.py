@@ -218,7 +218,7 @@ def derive_funding_agency(record):
 
 def derive_award_type(core_project_num):
     """Extract the NIH activity code (award type) from a core project
-    number, e.g., 'R21' from 'R21AG087904', 'P41' from 'P41EB017183'."""
+    number, e.g., 'R21' from 'R21AG087904', 'UH3' from 'UH3CA239861'."""
     core = (core_project_num or "").upper()
     m = re.match(r"^([A-Z]{1,2}\d{2})", core)
     return m.group(1) if m else ""
@@ -341,26 +341,30 @@ def summarize_grant(core_project_num, records, annual_method="average",
     (subproject_id empty) to avoid double-counting.
 
     SUPPLEMENTS: Records whose project number contains an 'S<digit>' suffix
-    (e.g., '-05S1') are administrative/competing supplements. They provide
-    extra money within existing years, so they are:
+    (e.g., '-05S1') are supplements. They provide extra money within existing
+    years, so they are:
       - EXCLUDED from year-counting (funded_years, funding_model, projection)
       - INCLUDED in total costs (they are real awarded dollars)
-      - EXCLUDED from annual-cost calculations (so per-year figures reflect
-        the true annual award level, not supplement noise)
+      - EXCLUDED from annual-cost calculations
 
-    FUNDING MODEL DETECTION (via budget periods of REGULAR awards):
-      Each regular record's budget period tells us how many years it covers:
-        - ~12 months  -> traditional / staggered funding
-        - multi-year  -> Multi-Year Funding (full budget up front)
-      funded_years = merged (de-overlapped) coverage of regular awards.
+    YEAR ACCOUNTING (based on the records actually retrieved):
+      - funded_years  = merged (de-overlapped) budget coverage of REGULAR
+                        awards, in whole years.
+      - intended_years = span from the EARLIEST regular budget_start to the
+                        project_end. This aligns the "intended" duration with
+                        the records we actually have (important for phased
+                        awards like UG3/UH3, where earlier phases live under a
+                        different core number and are not retrieved here).
+      - projected_years = the forward gap from the LATEST regular budget_end
+                        to the project_end (never backfills earlier gaps).
 
     annual_method: "average" (mean annualized rate of regular awards) or
       "latest" (annualized rate of the most recent regular award).
 
     project_future:
       - False: totals = actual sum of ALL awarded records (default)
-      - True:  for active grants, add unfunded project years at the latest
-               regular annualized rate.
+      - True:  for active grants, add the forward-projected years at the
+               latest regular annual rate.
     """
     if not records:
         return None
@@ -394,7 +398,6 @@ def summarize_grant(core_project_num, records, annual_method="average",
             f"costs, but included in totals."
         )
 
-    # If (unexpectedly) there are no regular records, fall back to all.
     year_records = regular_records if regular_records else working
     latest_regular = year_records[-1]
 
@@ -448,19 +451,29 @@ def summarize_grant(core_project_num, records, annual_method="average",
     actual_indirect = total_raw("indirect_cost_amt")
     actual_total = total_raw("award_amount")
 
-    # --- Project period dates ---
-    start_dates = [r.get("project_start_date") for r in working if r.get("project_start_date")]
+    # --- Project period end date ---
     end_dates = [r.get("project_end_date") for r in working if r.get("project_end_date")]
-    project_start = min(start_dates) if start_dates else None
     project_end = max(end_dates) if end_dates else None
 
-    span_months = months_between(project_start, project_end)
-    if span_months is not None and span_months > 0:
-        intended_years = max(1, round(span_months / 12))
+    # Project start (for display only). We also compute the earliest funded
+    # budget start, which anchors the effective duration for phased awards.
+    start_dates = [r.get("project_start_date") for r in working if r.get("project_start_date")]
+    project_start_full = min(start_dates) if start_dates else None
+
+    budget_starts = [r.get("budget_start") for r in year_records if r.get("budget_start")]
+    budget_ends = [r.get("budget_end") for r in year_records if r.get("budget_end")]
+    earliest_budget_start = min(budget_starts) if budget_starts else None
+    latest_budget_end = max(budget_ends) if budget_ends else None
+
+    # --- intended_years: span from earliest funded budget_start -> project_end
+    # (aligns intended duration with the records actually retrieved). ---
+    eff_span_months = months_between(earliest_budget_start, project_end)
+    if eff_span_months is not None and eff_span_months > 0:
+        intended_years = max(1, round(eff_span_months / 12))
     else:
         intended_years = funded_years
 
-    # Safety cap: cannot fund more years than the project spans.
+    # Safety cap: cannot fund more years than the intended span.
     if intended_years and funded_years > intended_years:
         safe_log(
             f"  Note: funded_years ({funded_years}) exceeded intended_years "
@@ -468,7 +481,7 @@ def summarize_grant(core_project_num, records, annual_method="average",
         )
         funded_years = intended_years
 
-    # --- Active status (end date after today) ---
+    # --- Active status (project end date after today) ---
     end_year = year_from_date(project_end)
     end_month = month_from_date(project_end, default=12)
     today = datetime.date.today()
@@ -477,13 +490,16 @@ def summarize_grant(core_project_num, records, annual_method="average",
         if (end_year > today.year) or (end_year == today.year and end_month >= today.month):
             is_active = True
 
-    # --- Remaining (unfunded) years ---
-    if is_active:
-        projected_years = max(0, intended_years - funded_years)
-    else:
-        projected_years = 0
+    # --- Projected (forward-only) years: gap from LAST funded budget_end
+    # to the project_end. Never backfills earlier gaps (phased awards). ---
+    projected_years = 0
+    if is_active and latest_budget_end and project_end:
+        forward_months = months_between(latest_budget_end, project_end)
+        if forward_months is not None and forward_months > 0:
+            projected_years = round(forward_months / 12)
+        projected_years = max(0, projected_years)
 
-    # --- Projected totals: add unfunded years at latest regular annual rate ---
+    # --- Projected totals: add forward years at latest regular annual rate ---
     lyrs = years_covered_by_record(latest_regular)
     per_year_direct = round((latest_regular.get("direct_cost_amt") or 0) / lyrs)
     per_year_indirect = round((latest_regular.get("indirect_cost_amt") or 0) / lyrs)
@@ -510,7 +526,7 @@ def summarize_grant(core_project_num, records, annual_method="average",
         "title": latest_regular.get("project_title"),
         "project_pi": latest_regular.get("contact_pi_name"),
         "application_id": core_project_num,
-        "project_start_date": to_year_month(project_start),
+        "project_start_date": to_year_month(project_start_full),
         "project_end_date": to_year_month(project_end),
         "is_active": "Yes" if is_active else "No",
         "funding_model": funding_model,
@@ -728,7 +744,7 @@ def main():
             annual_method = "average"
             del args[idx:]
 
-    # Optional: --project  -> extrapolate unfunded years for active grants
+    # Optional: --project  -> extrapolate forward-projected years for active grants
     project_future = False
     if "--project" in args:
         project_future = True
