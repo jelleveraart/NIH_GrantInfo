@@ -13,6 +13,8 @@ from nih_grant_history import (
     fmt_money,
     FIELDNAMES,
     MONEY_FIELDS,
+    NYU_CV_FIELDNAMES,
+    summary_to_nyu_cv_row,
 )
 
 app = Flask(__name__)
@@ -94,7 +96,7 @@ def search():
 
 @app.route("/download", methods=["POST"])
 def download():
-    """Regenerate results and return them as a downloadable CSV."""
+    """Return results as a standard CSV."""
     raw_input = request.form.get("query", "").strip()
     search_mode = request.form.get("search_mode", "grant_id")
     annual_method = normalize_annual_method(request.form.get("annual_method"))
@@ -118,6 +120,32 @@ def download():
         output.getvalue(),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=grant_summaries.csv"},
+    )
+
+
+@app.route("/download_nyu", methods=["POST"])
+def download_nyu():
+    """Return results formatted as an NYU CV table CSV."""
+    raw_input = request.form.get("query", "").strip()
+    search_mode = request.form.get("search_mode", "grant_id")
+    annual_method = normalize_annual_method(request.form.get("annual_method"))
+    project_future = parse_bool(request.form.get("project_future"))
+
+    grant_ids, _ = resolve_grant_ids(search_mode, raw_input)
+    summaries, _ = summarize_grants(
+        grant_ids, annual_method=annual_method, project_future=project_future
+    )
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=NYU_CV_FIELDNAMES)
+    writer.writeheader()
+    for s in summaries:
+        writer.writerow(summary_to_nyu_cv_row(s))
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=NYU_CV_table.csv"},
     )
 
 

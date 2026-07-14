@@ -13,9 +13,10 @@ indirect, and total costs. Available as both a **command-line tool** and a
 - Retrieves the complete funding history for each grant via the official NIH RePORTER API
 - Computes both **annual** and **lifetime (total)** direct, indirect, and total costs
 - **Choose how the annual metric is computed:** average across all active years, or the most recent year only
+- **Project total costs for active grants** by extrapolating remaining years
 - Correctly handles **multi-component awards** (e.g., P41, P01, U54) by excluding subprojects to avoid double-counting
-- Outputs a tidy CSV with one row per grant
-- Web interface with a results table and CSV download
+- Export results as a **standard CSV** or a formatted **NYU CV table**
+- Web interface with a results table and download options
 - Built-in safety guards against runaway API queries
 
 ## Requirements
@@ -58,27 +59,32 @@ python3 nih_grant_history.py R21AG087904,R01EB027075,R01CA245671
 
 ### Search by investigator
 
-Use the `--pi` flag to find all grants for a Principal Investigator:
+Use the `--pi` flag to find all grants for a Principal Investigator (name in
+`Last, First` format):
 
 ```bash
-# Investigator name in "Last, First" format
-python3 nih_grant_history.py --pi "Fieremans, Els"
-
-# Combine with the annual metric option
-python3 nih_grant_history.py --pi "Fieremans, Els" --annual latest
+python3 nih_grant_history.py --pi "Doe, John"
 ```
 
-### Annual metric option
-
-Use the `--annual` flag to control how annual costs are computed:
+### Options
 
 ```bash
-# Average across all active years (default)
+# Annual metric: average across all active years (default) or latest year only
 python3 nih_grant_history.py R21AG087904 --annual average
-
-# Most recent year only
 python3 nih_grant_history.py R21AG087904 --annual latest
+
+# Project total costs for active grants (extrapolate remaining years)
+python3 nih_grant_history.py R01EB027075 --project
+
+# Also write the NYU CV table (NYU_CV_table.csv)
+python3 nih_grant_history.py R21AG087904 --nyu
+
+# Options can be combined
+python3 nih_grant_history.py --pi "Fieremans, Els" --annual latest --project --nyu
 ```
+
+By default the CLI writes `grant_summaries.csv`. Adding `--nyu` also writes
+`NYU_CV_table.csv`.
 
 ### Grant ID format
 
@@ -101,11 +107,13 @@ Then open http://127.0.0.1:5000 in your browser:
 1. Use the **"Search by"** toggle to choose **Grant ID** or **Investigator**.
    - For grant ID: enter one or more core project numbers.
    - For investigator: enter the name in `Last, First` format (e.g., `Fieremans, Els`).
-2. Choose the **annual metric** using the radio buttons:
-   - *Average across all active years*
-   - *Most recent year only*
-3. Click **Search** to view results in a table.
-4. Click **Download CSV** to export them.
+2. Choose the **annual metric** (average across years, or most recent year only).
+3. Optionally check **"Project total costs for active grants"** to extrapolate
+   remaining years for grants that have not yet ended.
+4. Click **Search** to view results in a table.
+5. Export the results:
+   - **Download CSV** — standard summary format.
+   - **Download NYU CV Table** — formatted for an NYU CV (see below).
 
 ### One-Click Launcher (macOS)
 
@@ -123,6 +131,8 @@ To stop the app, press `Ctrl+C` in the Terminal window or close the window.
 
 ## Output
 
+### Standard CSV
+
 One row per grant with the following columns:
 
 | Column | Description |
@@ -133,15 +143,41 @@ One row per grant with the following columns:
 | `application_id` | Grant ID (e.g., `R21AG087904`) |
 | `project_start_date` | Earliest project start (`YYYY/MM`) |
 | `project_end_date` | Latest project end (`YYYY/MM`) |
+| `is_active` | Whether the grant is still active (`Yes`/`No`) |
 | `annual_method` | How annual costs were computed (`average` or `latest`) |
+| `total_basis` | Whether totals are `actual` or `projected` |
+| `projected_years` | Number of remaining years extrapolated (if projected) |
 | `annual_direct_costs` | Annual direct costs |
 | `annual_indirect_costs` | Annual indirect costs |
 | `annual_total_costs` | Annual total costs |
-| `total_direct_costs` | Sum of direct costs across all years |
-| `total_indirect_costs` | Sum of indirect costs across all years |
-| `total_project_costs` | Sum of total costs across all years |
+| `total_direct_costs` | Total direct costs |
+| `total_indirect_costs` | Total indirect costs |
+| `total_project_costs` | Total project costs |
 
 Cost values are formatted as `$1,023,343`.
+
+### NYU CV Table
+
+The **Download NYU CV Table** button (web) or `--nyu` flag (CLI) produces a CSV
+with columns formatted for an NYU CV:
+
+| Column | Notes |
+|---|---|
+| Funding Agency | e.g., `NIH/NIA` |
+| Role | Left blank (fill in manually if not PI) |
+| Effort % | Left blank (fill in manually) |
+| Project Title | |
+| Award Type | Activity code, e.g., `R21`, `R01`, `P41` |
+| Grant # | e.g., `R21AG087904` |
+| Project ID | Left blank |
+| Project Start Date | `YYYY/MM` |
+| Project End Date | `YYYY/MM` |
+| Annual Project Direct Costs | |
+| Annual Project Indirect Costs | |
+| Annual Project Total Costs | |
+| Total Project Direct Costs | |
+| Total Project Indirect Costs | |
+| Total Project Costs | |
 
 ## How It Works
 
@@ -155,6 +191,20 @@ For **multi-component awards** (P41, P01, U54, etc.), RePORTER returns both a
 parent/overall record and individual subproject records per fiscal year. The
 tool keeps only the parent records to avoid double-counting costs.
 
+### Projected totals
+
+When projection is enabled, the tool estimates the total cost of an active grant:
+
+1. It computes the intended project duration (in whole years) from the project
+   start and end dates.
+2. It counts the fiscal-year records already awarded.
+3. Remaining years = intended duration − awarded records (only if the grant is
+   genuinely still active, based on the end date).
+4. Each remaining year is estimated using the **most recent year's** costs.
+
+The `total_basis` and `projected_years` columns make it transparent whether a
+figure is actual or projected.
+
 ## Notes & Caveats
 
 - Costs are averaged/summed only over fiscal years with reported values, so
@@ -162,6 +212,8 @@ tool keeps only the parent records to avoid double-counting costs.
 - Older grants may lack a direct/indirect breakdown in the RePORTER data.
 - Investigator search matches on last and first name. Common names may return
   grants from multiple people sharing the same name.
+- Projected totals are estimates. No-cost extensions (which extend the end date
+  without new funding) may lead to over-projection in rare cases.
 - The tool respects the API with a ~1 request/second pace and includes a
   safety guard that aborts if a query unexpectedly matches too many records.
 

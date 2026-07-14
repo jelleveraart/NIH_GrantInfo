@@ -2,6 +2,7 @@ import csv
 import sys
 import time
 import datetime
+import re
 import requests
 
 API_URL = "https://api.reporter.nih.gov/v2/projects/search"
@@ -213,6 +214,15 @@ def derive_funding_agency(record):
     return "NIH"
 
 
+def derive_award_type(core_project_num):
+    """Extract the NIH activity code (award type) from a core project
+    number, e.g., 'R21' from 'R21AG087904', 'P41' from 'P41EB017183'."""
+    core = (core_project_num or "").upper()
+    # Activity code: 1-2 letters followed by 2 digits (e.g., R01, R21, P41, U54, K99).
+    m = re.match(r"^([A-Z]{1,2}\d{2})", core)
+    return m.group(1) if m else ""
+
+
 def to_year_month(date_str):
     """Convert an ISO-ish date string into 'YYYY/MM'."""
     if not date_str:
@@ -233,6 +243,26 @@ def year_from_date(date_str):
     return None
 
 
+def month_from_date(date_str, default=1):
+    """Extract a 2-digit month (int) from a 'YYYY-MM...' date string."""
+    if not date_str:
+        return default
+    s = str(date_str)[5:7]
+    return int(s) if s.isdigit() else default
+
+
+def months_between(start_date, end_date):
+    """Approximate whole-month span between two 'YYYY-MM...' date strings.
+    Returns None if either date is unparseable."""
+    sy = year_from_date(start_date)
+    ey = year_from_date(end_date)
+    if sy is None or ey is None:
+        return None
+    sm = month_from_date(start_date, default=1)
+    em = month_from_date(end_date, default=1)
+    return (ey - sy) * 12 + (em - sm)
+
+
 def fmt_money(val):
     """Format a number as '$1,023,343'."""
     if val is None:
@@ -244,20 +274,23 @@ def summarize_grant(core_project_num, records, annual_method="average",
                     project_future=False):
     """Collapse fiscal-year records into a single summary dict.
 
-    For multi-component awards (e.g., P41, P01, U54), RePORTER returns
-    both a parent/overall record AND individual subproject records for
-    each fiscal year. Summing all of them double-counts the money, so
-    we keep only the parent records (subproject_id is empty).
+    For multi-component awards (P41, P01, U54), keep only parent records
+    (subproject_id empty) to avoid double-counting.
 
-    annual_method controls how "annual" costs are computed:
-      - "average": mean across all active years (default)
-      - "latest":  most recent fiscal year only
+    annual_method: "average" (mean across years) or "latest" (most recent year).
 
     project_future controls the TOTAL columns:
       - False: totals = actual sum of awarded years (default)
-      - True:  for active grants, totals = actual to date PLUS an
-               extrapolation of remaining years, using the most recent
-               year's costs for each remaining year.
+      - True:  for active grants, add an extrapolation of remaining years
+               using the most recent year's costs.
+
+    Remaining-year logic:
+      1. Compute the intended project duration (whole years) from the
+         start and end dates (month-aware span).
+      2. Count how many fiscal-year records were actually awarded.
+      3. projected_years = max(0, intended_duration - awarded_records),
+         but only if the grant is genuinely still active (end date in
+         the future relative to today).
     """
     if not records:
         return None
@@ -288,7 +321,7 @@ def summarize_grant(core_project_num, records, annual_method="average",
     def total(vals):
         return sum(vals) if vals else 0
 
-    # Annual metric depends on the chosen method.
+    # --- Annual metric ---
     if annual_method == "latest":
         annual_direct = latest.get("direct_cost_amt") or 0
         annual_indirect = latest.get("indirect_cost_amt") or 0
@@ -305,19 +338,32 @@ def summarize_grant(core_project_num, records, annual_method="average",
     project_start = min(start_dates) if start_dates else None
     project_end = max(end_dates) if end_dates else None
 
-    # --- Determine active status and remaining years ---
-    latest_fy = latest.get("fiscal_year")
-    end_year = year_from_date(project_end)
-    current_year = datetime.date.today().year
+    # --- Intended duration, awarded records, and remaining years ---
+    awarded_records = len(working)
 
+    # Intended duration in whole years from the month-aware span.
+    span_months = months_between(project_start, project_end)
+    if span_months is not None and span_months > 0:
+        # Round to nearest whole year (e.g., a 21-month grant -> 2 years).
+        intended_years = max(1, round(span_months / 12))
+    else:
+        intended_years = awarded_records  # fallback if dates unavailable
+
+    # Is the grant genuinely still active? (end date after today)
+    end_year = year_from_date(project_end)
+    end_month = month_from_date(project_end, default=12)
+
+    today = datetime.date.today()
     is_active = False
-    projected_years = 0
-    if end_year and latest_fy:
-        # Active if the project end year is beyond the latest awarded FY
-        # AND the project has not already ended relative to today.
-        if end_year > latest_fy and end_year >= current_year:
+    if end_year:
+        if (end_year > today.year) or (end_year == today.year and end_month >= today.month):
             is_active = True
-            projected_years = end_year - latest_fy
+
+    # Remaining (projected) years: intended minus awarded, only if active.
+    if is_active:
+        projected_years = max(0, intended_years - awarded_records)
+    else:
+        projected_years = 0
 
     # --- Actual (awarded) totals ---
     actual_direct = total(directs)
@@ -390,8 +436,75 @@ MONEY_FIELDS = {
 }
 
 
+# ---- NYU CV table export ----
+
+NYU_CV_FIELDNAMES = [
+    "Funding Agency",
+    "Role",
+    "Effort %",
+    "Project Title",
+    "Award Type",
+    "Grant #",
+    "Project ID",
+    "Project Start Date",
+    "Project End Date",
+    "Annual Project Direct Costs",
+    "Annual Project Indirect Costs",
+    "Annual Project Total Costs",
+    "Total Project Direct Costs",
+    "Total Project Indirect Costs",
+    "Total Project Costs",
+]
+
+NYU_CV_MONEY_FIELDS = {
+    "Annual Project Direct Costs",
+    "Annual Project Indirect Costs",
+    "Annual Project Total Costs",
+    "Total Project Direct Costs",
+    "Total Project Indirect Costs",
+    "Total Project Costs",
+}
+
+
+def summary_to_nyu_cv_row(summary):
+    """Map an internal summary dict to an NYU CV table row (formatted)."""
+    grant_num = summary.get("application_id", "")
+    return {
+        "Funding Agency": summary.get("funding_agency", ""),
+        "Role": "",  # left blank per spec (blank if not PI)
+        "Effort %": "",  # left blank per spec
+        "Project Title": summary.get("title", ""),
+        "Award Type": derive_award_type(grant_num),
+        "Grant #": grant_num,
+        "Project ID": "",  # left blank per spec
+        "Project Start Date": summary.get("project_start_date", ""),
+        "Project End Date": summary.get("project_end_date", ""),
+        "Annual Project Direct Costs": fmt_money(summary.get("annual_direct_costs")),
+        "Annual Project Indirect Costs": fmt_money(summary.get("annual_indirect_costs")),
+        "Annual Project Total Costs": fmt_money(summary.get("annual_total_costs")),
+        "Total Project Direct Costs": fmt_money(summary.get("total_direct_costs")),
+        "Total Project Indirect Costs": fmt_money(summary.get("total_indirect_costs")),
+        "Total Project Costs": fmt_money(summary.get("total_project_costs")),
+    }
+
+
+def write_nyu_cv_csv(summaries, filename):
+    """Write summaries to an NYU-formatted CV CSV (one row per grant)."""
+    if not summaries:
+        safe_log("No summaries to write.")
+        return
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=NYU_CV_FIELDNAMES)
+        writer.writeheader()
+        for summary in summaries:
+            writer.writerow(summary_to_nyu_cv_row(summary))
+
+    safe_log(f"\nWrote NYU CV table ({len(summaries)} grant(s)) to {filename}")
+
+
 def write_summary_csv(summaries, filename):
-    """Write one row per grant to a single CSV."""
+    """Write one row per grant to a single CSV (standard format)."""
     if not summaries:
         safe_log("No summaries to write.")
         return
@@ -498,6 +611,12 @@ def main():
         project_future = True
         args.remove("--project")
 
+    # Optional: --nyu  -> also write the NYU CV table
+    write_nyu = False
+    if "--nyu" in args:
+        write_nyu = True
+        args.remove("--nyu")
+
     # Optional: --pi "Last, First"  -> search by investigator
     pi_mode = False
     pi_name = None
@@ -525,10 +644,10 @@ def main():
             safe_log("Usage:")
             safe_log("  By grant ID:")
             safe_log("    python3 nih_grant_history.py <GRANT_ID>[,<GRANT_ID>,...] "
-                     "[--annual average|latest] [--project]")
+                     "[--annual average|latest] [--project] [--nyu]")
             safe_log("  By investigator:")
             safe_log("    python3 nih_grant_history.py --pi \"Last, First\" "
-                     "[--annual average|latest] [--project]")
+                     "[--annual average|latest] [--project] [--nyu]")
             sys.exit(1)
         grant_ids = parse_grant_ids(args)
         safe_log(f"Processing {len(grant_ids)} grant(s) "
@@ -547,6 +666,8 @@ def main():
         return
 
     write_summary_csv(summaries, "grant_summaries.csv")
+    if write_nyu:
+        write_nyu_cv_csv(summaries, "NYU_CV_table.csv")
     print_summary_table(summaries)
 
 

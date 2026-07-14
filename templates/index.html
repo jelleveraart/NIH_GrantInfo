@@ -161,6 +161,9 @@
           <button type="button" id="downloadBtn" class="secondary" disabled>
             Download CSV
           </button>
+          <button type="button" id="downloadNyuBtn" class="secondary" disabled>
+            Download NYU CV Table
+          </button>
         </div>
       </form>
     </div>
@@ -182,6 +185,7 @@
     const form = document.getElementById("grantForm");
     const submitBtn = document.getElementById("submitBtn");
     const downloadBtn = document.getElementById("downloadBtn");
+    const downloadNyuBtn = document.getElementById("downloadNyuBtn");
     const statusEl = document.getElementById("status");
     const errorsEl = document.getElementById("errors");
     const resultsCard = document.getElementById("resultsCard");
@@ -232,13 +236,13 @@
       radio.addEventListener("change", () => {
         if (getSearchMode() === "pi") {
           queryLabel.textContent = "Investigator Name";
-          queryInput.placeholder = "Fieremans, Els";
+          queryInput.placeholder = "Doe, John";
           queryHint.innerHTML =
             "Enter an investigator name (format: <code>Last, First</code>). " +
             "Common names may return many grants.";
         } else {
           queryLabel.textContent = "Grant IDs";
-          queryInput.placeholder = "R21AG087904, R01EB027075, R01CA245671";
+          queryInput.placeholder = "R21AG179904, R01EB136076, R01CA123456";
           queryHint.innerHTML =
             "Enter one or more core project numbers, separated by commas or " +
             "spaces (e.g., <code>R21AG087904</code>).";
@@ -257,6 +261,7 @@
 
       submitBtn.disabled = true;
       downloadBtn.disabled = true;
+      downloadNyuBtn.disabled = true;
       errorsEl.innerHTML = "";
       resultsCard.style.display = "none";
       statusEl.style.display = "block";
@@ -288,7 +293,10 @@
             .map(msg => `<div class="error">${msg}</div>`).join("");
         }
         statusEl.textContent = `Found ${data.rows.length} grant(s).`;
-        if (data.rows.length > 0) downloadBtn.disabled = false;
+        if (data.rows.length > 0) {
+          downloadBtn.disabled = false;
+          downloadNyuBtn.disabled = false;
+        }
       } catch (err) {
         showError("Request failed: " + err.message);
       } finally {
@@ -296,7 +304,8 @@
       }
     });
 
-    downloadBtn.addEventListener("click", () => {
+    // Reusable download submitter — posts current options to the given action.
+    function submitDownload(action) {
       const query = queryInput.value.trim();
       const searchMode = getSearchMode();
       const annualMethod = getAnnualMethod();
@@ -304,7 +313,7 @@
 
       const dlForm = document.createElement("form");
       dlForm.method = "POST";
-      dlForm.action = "/download";
+      dlForm.action = action;
 
       [["query", query], ["search_mode", searchMode],
        ["annual_method", annualMethod], ["project_future", projectFuture]]
@@ -319,7 +328,10 @@
       document.body.appendChild(dlForm);
       dlForm.submit();
       document.body.removeChild(dlForm);
-    });
+    }
+
+    downloadBtn.addEventListener("click", () => submitDownload("/download"));
+    downloadNyuBtn.addEventListener("click", () => submitDownload("/download_nyu"));
 
     function renderTable(columns, rows) {
       tableHead.innerHTML = columns
