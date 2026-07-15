@@ -139,6 +139,7 @@
       font-size: 1rem; padding: 0 0.3rem; line-height: 1;
     }
     .cart-remove:hover { background: none; color: #7a1a1a; }
+    .divider { border-left: 1px solid var(--border); height: 1.6rem; margin: 0 0.25rem; }
   </style>
 </head>
 <body>
@@ -238,6 +239,7 @@
         <p class="cart-empty" id="cartEmpty">
           No grants collected yet. Run a search, select rows, and click
           “Add selected to collection” to build a list across multiple searches.
+          You can also import a previously saved collection.
         </p>
         <ul class="cart-list" id="cartList"></ul>
         <div id="cartNote"></div>
@@ -252,14 +254,28 @@
         <button type="button" id="copyIdsBtn" class="secondary" disabled>
           Copy grant IDs to Grant ID search
         </button>
+        <span class="divider"></span>
+        <button type="button" id="saveCollectionBtn" class="secondary" disabled>
+          Save collection (file)
+        </button>
+        <button type="button" id="importCollectionBtn" class="secondary">
+          Import collection (file)
+        </button>
+        <input type="file" id="importFileInput" accept=".json,application/json"
+               style="display:none;">
+        <span class="divider"></span>
         <button type="button" id="clearCartBtn" class="secondary" disabled>
           Clear collection
         </button>
+        <span class="toast" id="cartToast"></span>
       </div>
     </div>
   </div>
 
   <script>
+    const COLLECTION_FORMAT = "nih-grant-info-collection";
+    const COLLECTION_VERSION = 1;
+
     const form = document.getElementById("grantForm");
     const submitBtn = document.getElementById("submitBtn");
     const downloadBtn = document.getElementById("downloadBtn");
@@ -288,12 +304,15 @@
     const exportCartBtn = document.getElementById("exportCartBtn");
     const exportCartNyuBtn = document.getElementById("exportCartNyuBtn");
     const copyIdsBtn = document.getElementById("copyIdsBtn");
+    const saveCollectionBtn = document.getElementById("saveCollectionBtn");
+    const importCollectionBtn = document.getElementById("importCollectionBtn");
+    const importFileInput = document.getElementById("importFileInput");
     const clearCartBtn = document.getElementById("clearCartBtn");
+    const cartToastEl = document.getElementById("cartToast");
 
-    // Current search results (full row objects) and the persistent cart.
     let currentRows = [];
     let currentColumns = [];
-    let cart = [];  // array of full row objects, accumulated across searches
+    let cart = [];
 
     const LABELS = {
       funding_agency: "Funding Agency",
@@ -503,7 +522,7 @@
       addToCartBtn.disabled = none;
     }
 
-    // --- Downloads (results selection) ---
+    // --- Downloads ---
     async function downloadRows(rows, action, filename) {
       if (!rows.length) return;
       const resp = await fetch(action, {
@@ -513,6 +532,10 @@
       });
       if (!resp.ok) { showError("Download failed."); return; }
       const blob = await resp.blob();
+      triggerDownload(blob, filename);
+    }
+
+    function triggerDownload(blob, filename) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = filename;
@@ -527,7 +550,6 @@
 
     // --- Cart ---
     function cartKey(row) {
-      // Dedup key: grant ID + record type + normalized title
       const id = (row.application_id || "").toUpperCase();
       const rt = (row.record_type || "");
       const title = (row.title || "").toLowerCase().replace(/[^\w\s]/g, " ")
@@ -535,18 +557,21 @@
       return `${id}|${rt}|${title}`;
     }
 
-    addToCartBtn.addEventListener("click", () => {
-      const selected = getSelectedRows();
-      if (!selected.length) return;
-
+    function mergeIntoCart(rows) {
       const existingKeys = new Set(cart.map(cartKey));
       let added = 0, dup = 0;
-      selected.forEach(row => {
+      rows.forEach(row => {
         const key = cartKey(row);
         if (existingKeys.has(key)) { dup++; }
         else { cart.push(row); existingKeys.add(key); added++; }
       });
+      return { added, dup };
+    }
 
+    addToCartBtn.addEventListener("click", () => {
+      const selected = getSelectedRows();
+      if (!selected.length) return;
+      const { added, dup } = mergeIntoCart(selected);
       renderCart();
       let msg = `Added ${added} grant(s)`;
       if (dup) msg += ` (${dup} duplicate${dup > 1 ? "s" : ""} skipped)`;
@@ -561,6 +586,7 @@
       exportCartBtn.disabled = !has;
       exportCartNyuBtn.disabled = !has;
       copyIdsBtn.disabled = !has;
+      saveCollectionBtn.disabled = !has;
       clearCartBtn.disabled = !has;
 
       cartListEl.innerHTML = cart.map((row, idx) => {
@@ -575,7 +601,6 @@
           </li>`;
       }).join("");
 
-      // Wire remove buttons
       cartListEl.querySelectorAll(".cart-remove").forEach(btn => {
         btn.addEventListener("click", () => {
           const idx = parseInt(btn.getAttribute("data-idx"), 10);
@@ -583,7 +608,6 @@
         });
       });
 
-      // Subproject note
       const hasSub = cart.some(r => (r.record_type || "") === "Sub");
       cartNoteEl.innerHTML = hasSub
         ? `<div class="note">Note: sub-project entries will appear as their
@@ -598,7 +622,6 @@
       downloadRows(cart, "/download_nyu", "NYU_CV_table.csv"));
 
     copyIdsBtn.addEventListener("click", () => {
-      // Unique grant IDs from the cart (dedup, preserve order)
       const seen = new Set();
       const ids = [];
       cart.forEach(row => {
@@ -608,18 +631,96 @@
           ids.push(id);
         }
       });
-      // Switch to Grant ID mode and replace the box with the cart's IDs
       document.querySelector('input[name="search_mode"][value="grant_id"]').checked = true;
       applySearchModeUI();
       queryInput.value = ids.join(", ");
-      toastEl.textContent = `Copied ${ids.length} grant ID(s) to the Grant ID search box.`;
+      cartToastEl.textContent = `Copied ${ids.length} grant ID(s) to the Grant ID search box.`;
       queryInput.focus();
     });
 
     clearCartBtn.addEventListener("click", () => {
       cart = [];
       renderCart();
-      toastEl.textContent = "Collection cleared.";
+      cartToastEl.textContent = "Collection cleared.";
+    });
+
+    // --- Save collection (client-side JSON download) ---
+    saveCollectionBtn.addEventListener("click", () => {
+      if (!cart.length) return;
+      const payload = {
+        format: COLLECTION_FORMAT,
+        version: COLLECTION_VERSION,
+        exported_at: new Date().toISOString(),
+        count: cart.length,
+        grants: cart,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)],
+                            { type: "application/json" });
+      triggerDownload(blob, "nih_collection.json");
+      cartToastEl.textContent = `Saved collection (${cart.length} grant(s)).`;
+    });
+
+    // --- Import collection (client-side file read + merge) ---
+    importCollectionBtn.addEventListener("click", () => {
+      importFileInput.value = "";  // reset so re-importing the same file works
+      importFileInput.click();
+    });
+
+    importFileInput.addEventListener("change", (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        let data;
+        try {
+          data = JSON.parse(ev.target.result);
+        } catch (err) {
+          cartToastEl.textContent = "Import failed: file is not valid JSON.";
+          return;
+        }
+
+        // Accept either our wrapped format or a bare array of rows.
+        let grants;
+        if (Array.isArray(data)) {
+          grants = data;
+        } else if (data && Array.isArray(data.grants)) {
+          if (data.format && data.format !== COLLECTION_FORMAT) {
+            cartToastEl.textContent =
+              "Import failed: unrecognized collection format.";
+            return;
+          }
+          grants = data.grants;
+        } else {
+          cartToastEl.textContent =
+            "Import failed: no grant collection found in file.";
+          return;
+        }
+
+        // Validate each item minimally (must have an application_id).
+        const valid = grants.filter(g =>
+          g && typeof g === "object" && g.application_id);
+        const invalid = grants.length - valid.length;
+
+        if (!valid.length) {
+          cartToastEl.textContent =
+            "Import failed: no valid grant entries in file.";
+          return;
+        }
+
+        const { added, dup } = mergeIntoCart(valid);
+        renderCart();
+
+        let msg = `Imported ${added} grant(s)`;
+        if (dup) msg += ` (${dup} duplicate${dup > 1 ? "s" : ""} skipped)`;
+        if (invalid) msg += ` (${invalid} invalid entr${invalid > 1 ? "ies" : "y"} ignored)`;
+        msg += `. Collection now has ${cart.length}.`;
+        cartToastEl.textContent = msg;
+      };
+      reader.onerror = () => {
+        cartToastEl.textContent = "Import failed: could not read the file.";
+      };
+      reader.readAsText(file);
     });
 
     renderCart();  // initialize empty state
